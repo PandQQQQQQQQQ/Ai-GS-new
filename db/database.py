@@ -190,7 +190,8 @@ class Database:
     
     def save_news(self, news_list: List[Dict[str, Any]]) -> Dict[str, int]:
         """
-        保存新闻列表到数据库（根据标题+时间组合去重）
+        保存新闻列表到数据库（按标题严格去重）
+        不同来源的同一条新闻（标题相同）只保留一条
         
         Args:
             news_list: 新闻数据字典列表，每个字典应包含：
@@ -210,13 +211,14 @@ class Database:
         
         for news in news_list:
             title = news.get("title", "").strip()
-            publish_time = news.get("publish_time", "").strip()
+            if not title:
+                stats["duplicated"] += 1
+                continue
             
-            # 使用标题+发布时间组合生成唯一标识
-            unique_key = f"{title}|{publish_time}"
-            news_hash = hashlib.md5(unique_key.encode('utf-8')).hexdigest()
+            # 仅根据标题生成唯一标识（跨来源去重）
+            news_hash = hashlib.md5(title.encode('utf-8')).hexdigest()
             
-            # 检查是否已存在
+            # 检查是否已存在（按标题查重）
             cursor = self.conn.cursor()
             cursor.execute(
                 "SELECT 1 FROM news WHERE news_hash = ? LIMIT 1",
@@ -238,7 +240,7 @@ class Database:
                     title,
                     news.get("content", ""),
                     news.get("source", ""),
-                    publish_time,
+                    news.get("publish_time", ""),
                     news.get("url", ""),
                     datetime.now(),
                     datetime.now()

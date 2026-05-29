@@ -82,7 +82,7 @@ class NewsRefreshWorker(QThread):
             self.progress_updated.emit(30)
             
             # 采集新闻（仅网络请求，无数据库操作）
-            news_list = self.scraper.fetch_latest_news(limit=50)
+            news_list = self.scraper.fetch_all_sources(limit_per_source=50)
             
             if not self.is_running:
                 return
@@ -560,8 +560,8 @@ class MainWindow(QMainWindow):
         self.fetch_worker = None
     
     def load_news_from_db(self):
-        """从数据库加载新闻到列表"""
-        news_list = self.db.get_all_news()
+        """从数据库加载新闻到列表（最多显示最近200条，避免卡顿）"""
+        news_list = self.db.get_all_news(limit=200)
         self.populate_news_table(news_list)
     
     def populate_news_table(self, news_list: list):
