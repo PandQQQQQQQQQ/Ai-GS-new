@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QDateTime, QUrl
 from PySide6.QtGui import QFont, QColor, QBrush, QDesktopServices
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from db.database import Database
 from scraper.news_scraper import NewsScraper
@@ -101,6 +102,45 @@ class NewsRefreshWorker(QThread):
         """停止线程"""
         self.is_running = False
         self.wait()
+
+
+class FullContentFetchWorker(QThread):
+    """
+    全文抓取工作线程
+    当新闻内容可能被截断时，后台抓取原文网页的完整内容
+    """
+    # 定义信号：抓取完成时发射
+    content_ready = Signal(dict)
+    
+    def __init__(self, scraper, url: str, original_content: str):
+        super().__init__()
+        self.scraper = scraper
+        self.url = url
+        self.original_content = original_content
+    
+    def run(self):
+        """线程执行函数"""
+        try:
+            full_content = self.scraper.fetch_full_content(self.url)
+            if full_content and len(full_content) > len(self.original_content):
+                self.content_ready.emit({
+                    'success': True,
+                    'content': full_content,
+                    'original': self.original_content
+                })
+            else:
+                self.content_ready.emit({
+                    'success': False,
+                    'content': None,
+                    'original': self.original_content
+                })
+        except Exception as e:
+            print(f"全文抓取线程异常: {e}")
+            self.content_ready.emit({
+                'success': False,
+                'content': None,
+                'original': self.original_content
+            })
 
 
 class AIAnalyzeWorker(QThread):
@@ -365,10 +405,11 @@ class MainWindow(QMainWindow):
         self.detail_meta.setStyleSheet("color: #666;")
         detail_layout.addWidget(self.detail_meta)
         
-        # 内容文本框
-        self.detail_content = QTextEdit()
-        self.detail_content.setReadOnly(True)
-        self.detail_content.setPlaceholderText("新闻内容将显示在这里...")
+        # 内容浏览器控件（支持HTML渲染和图片显示）
+        self.detail_content = QWebEngineView()
+        self.detail_content.setMinimumHeight(200)
+        # 网页加载完成后，自动净化内容（提取正文+注入暗黑样式）
+        self.detail_content.loadFinished.connect(self._on_webpage_loaded)
         detail_layout.addWidget(self.detail_content)
         
         # 原文链接（可点击）
@@ -630,7 +671,7 @@ class MainWindow(QMainWindow):
     
     def display_news_detail(self, news: dict):
         """
-        显示新闻详情
+        显示新闻详情（自动尝试抓取全文）
         
         Args:
             news: 新闻数据字典
@@ -645,13 +686,29 @@ class MainWindow(QMainWindow):
         meta_text = f"发布时间: {news.get('publish_time', '-')} | 来源: {news.get('source', '-')}"
         self.detail_meta.setText(meta_text)
         
-        # 内容
-        self.detail_content.setText(news.get("content", "暂无内容"))
+        # 内容：先显示已有内容，然后异步抓取全文
+        content = news.get("content", "暂无内容")
+        url = news.get("url", "")
+        
+        # 判断内容是否可能被截断（短于200字且有URL）
+        if len(content) < 200 and url:
+            # 先显示摘要，然后后台加载原文网页
+            placeholder_html = self._build_placeholder_html(content, url)
+            self.detail_content.setHtml(placeholder_html)
+            # 启动后台线程抓取全文
+            self._fetch_full_content_worker = FullContentFetchWorker(self.scraper, url, content)
+            self._fetch_full_content_worker.content_ready.connect(self._on_full_content_ready)
+            self._fetch_full_content_worker.start()
+        elif url:
+            # 有URL，直接加载原文网页（完美显示图片和排版）
+            self.detail_content.load(QUrl(url))
+        else:
+            # 无URL，显示纯文本
+            plain_html = self._build_plain_html(content)
+            self.detail_content.setHtml(plain_html)
         
         # 原文链接
-        url = news.get("url", "")
         if url:
-            # 显示短链接文本，但保存完整URL
             display_url = url[:60] + "..." if len(url) > 60 else url
             self.detail_url.setText(display_url)
             self.detail_url.setToolTip(f"点击打开: {url}")
@@ -663,19 +720,35 @@ class MainWindow(QMainWindow):
         ai_score = news.get("ai_score")
         if ai_score is not None:
             self.ai_score_label.setText(f"{ai_score:+.1f}")
-            # 设置颜色
             if ai_score > 0:
-                self.ai_score_label.setStyleSheet("color: #4CAF50;")  # 绿色
+                self.ai_score_label.setStyleSheet("color: #4CAF50;")
             elif ai_score < 0:
-                self.ai_score_label.setStyleSheet("color: #F44336;")  # 红色
+                self.ai_score_label.setStyleSheet("color: #F44336;")
             else:
-                self.ai_score_label.setStyleSheet("color: #999999;")  # 灰色
+                self.ai_score_label.setStyleSheet("color: #999999;")
         else:
             self.ai_score_label.setText("未分析")
             self.ai_score_label.setStyleSheet("color: #999;")
         
         self.ai_reason.setText(news.get("ai_analysis", "暂无AI分析结果"))
         self.ai_stocks.setText(news.get("related_stocks", "-"))
+    
+    def _on_full_content_ready(self, result: dict):
+        """
+        全文抓取完成回调 — 直接加载原文网页到QWebEngineView
+        
+        Args:
+            result: {'content': 完整内容, 'success': 是否成功}
+        """
+        url = self.current_news.get('url', '') if self.current_news else ''
+        if url:
+            # 直接加载原文网页（完美显示图片和排版）
+            self.detail_content.load(QUrl(url))
+        else:
+            # 无URL，显示抓取到的文本内容
+            content = result.get('content') or result.get('original', '暂无内容')
+            plain_html = self._build_plain_html(content)
+            self.detail_content.setHtml(plain_html)
     
     def _on_url_clicked(self, event):
         """
@@ -689,6 +762,230 @@ class MainWindow(QMainWindow):
             if url:
                 # 使用系统默认浏览器打开链接
                 QDesktopServices.openUrl(QUrl(url))
+    
+    def _build_placeholder_html(self, content: str, url: str) -> str:
+        """构建加载中的占位HTML"""
+        import html as html_mod
+        safe_content = html_mod.escape(content)
+        return f'''
+        <html><body style="font-family: Microsoft YaHei, sans-serif; padding:20px; color:#333;">
+        <p style="font-size:14px; line-height:1.8;">{safe_content}</p>
+        <p style="color:#888; margin-top:20px;">⏳ 正在加载完整内容...</p>
+        </body></html>
+        '''
+    
+    def _build_plain_html(self, content: str) -> str:
+        """构建纯文本内容的HTML"""
+        import html as html_mod
+        safe_content = html_mod.escape(content)
+        # 将换行转为段落
+        paragraphs = safe_content.split('\n')
+        paras_html = ''.join(f'<p style="font-size:14px; line-height:1.8; margin:6px 0;">{p}</p>' for p in paragraphs if p.strip())
+        return f'''
+        <html><body style="font-family: Microsoft YaHei, sans-serif; padding:12px; color:#333;">
+        {paras_html}
+        </body></html>
+        '''
+    
+    def _on_webpage_loaded(self, ok: bool):
+        """
+        网页加载完成回调
+        注入JavaScript提取正文内容，并应用暗黑科技风CSS样式
+        
+        Args:
+            ok: 网页是否加载成功
+        """
+        if not ok:
+            return
+        
+        # 注入净化脚本：提取正文 + 注入暗黑CSS
+        cleanup_js = """
+        (function() {
+            // ============================================================
+            // 1. 定义暗黑科技风CSS样式
+            // ============================================================
+            var darkCSS = `
+                /* 全局重置 */
+                * { margin: 0; padding: 0; box-sizing: border-box; }
+                
+                /* 页面背景与文字 */
+                body {
+                    background-color: #1a1a2e !important;
+                    color: #e0e0e0 !important;
+                    font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif !important;
+                    font-size: 16px !important;
+                    line-height: 1.8 !important;
+                    padding: 20px 24px !important;
+                    overflow-x: hidden !important;
+                }
+                
+                /* 段落排版 */
+                p {
+                    margin: 10px 0 !important;
+                    text-indent: 0 !important;
+                    font-size: 16px !important;
+                    line-height: 1.8 !important;
+                    color: #e0e0e0 !important;
+                }
+                
+                /* 标题 */
+                h1, h2, h3, h4, h5, h6 {
+                    color: #ffffff !important;
+                    margin: 20px 0 12px 0 !important;
+                    font-weight: bold !important;
+                }
+                h1 { font-size: 22px !important; }
+                h2 { font-size: 20px !important; }
+                h3 { font-size: 18px !important; }
+                
+                /* 图片：居中、自适应宽度 */
+                img {
+                    max-width: 100% !important;
+                    height: auto !important;
+                    display: block !important;
+                    margin: 16px auto !important;
+                    border-radius: 4px !important;
+                }
+                
+                /* 链接 */
+                a {
+                    color: #64b5f6 !important;
+                    text-decoration: none !important;
+                }
+                a:hover {
+                    color: #90caf9 !important;
+                    text-decoration: underline !important;
+                }
+                
+                /* 表格 */
+                table {
+                    border-collapse: collapse !important;
+                    width: 100% !important;
+                    margin: 16px 0 !important;
+                    font-size: 14px !important;
+                }
+                th, td {
+                    border: 1px solid #333355 !important;
+                    padding: 8px 12px !important;
+                    color: #e0e0e0 !important;
+                }
+                th {
+                    background-color: #252545 !important;
+                    color: #ffffff !important;
+                    font-weight: bold !important;
+                }
+                
+                /* 列表 */
+                ul, ol {
+                    padding-left: 24px !important;
+                    margin: 10px 0 !important;
+                }
+                li {
+                    margin: 6px 0 !important;
+                    color: #e0e0e0 !important;
+                }
+                
+                /* 引用 */
+                blockquote {
+                    border-left: 3px solid #4a4a8a !important;
+                    padding: 10px 16px !important;
+                    margin: 16px 0 !important;
+                    background-color: #252545 !important;
+                    color: #c0c0c0 !important;
+                    border-radius: 0 4px 4px 0 !important;
+                }
+                
+                /* 来源信息 */
+                .em_media, .source, .editor {
+                    color: #888888 !important;
+                    font-size: 13px !important;
+                    margin-top: 24px !important;
+                    padding-top: 12px !important;
+                    border-top: 1px solid #333355 !important;
+                }
+                
+                /* 隐藏不需要的元素 */
+                .ad, .advertisement, .sidebar, .nav, .header, .footer,
+                .comment, .share, .related, .recommend, .breadcrumb,
+                [class*="ad-"], [id*="ad-"], [class*="sidebar"],
+                script, style, noscript, iframe {
+                    display: none !important;
+                }
+                
+                /* 滚动条美化 */
+                ::-webkit-scrollbar { width: 8px; }
+                ::-webkit-scrollbar-track { background: #1a1a2e; }
+                ::-webkit-scrollbar-thumb { background: #4a4a8a; border-radius: 4px; }
+                ::-webkit-scrollbar-thumb:hover { background: #6a6aaa; }
+            `;
+            
+            // ============================================================
+            // 2. 注入CSS样式
+            // ============================================================
+            var styleEl = document.createElement('style');
+            styleEl.type = 'text/css';
+            styleEl.textContent = darkCSS;
+            document.head.appendChild(styleEl);
+            
+            // ============================================================
+            // 3. 提取正文内容（支持多个主流财经网站）
+            // ============================================================
+            var contentSelectors = [
+                '#ContentBody',           // 东方财富
+                '.b-new-content',         // 东方财富（旧版）
+                '.txtinfos',              // 东方财富（备用）
+                '.article-content',       // 财新网/中证网
+                '#Main_Content_Box',      // 财新网
+                '.cons-wrapper',          // 财新网
+                '#custom-page-content',   // 证券时报
+                '.article',               // 通用
+                'article',                // HTML5标准
+                '.content',               // 通用
+                '#ContentBody',           // 经济参考报
+            ];
+            
+            var contentElement = null;
+            for (var i = 0; i < contentSelectors.length; i++) {
+                var el = document.querySelector(contentSelectors[i]);
+                if (el && el.innerHTML.trim().length > 200) {
+                    contentElement = el;
+                    break;
+                }
+            }
+            
+            // ============================================================
+            // 4. 如果找到正文，用它替换整个页面
+            // ============================================================
+            if (contentElement) {
+                // 保留样式标签
+                var styles = document.querySelectorAll('style');
+                var styleHTML = '';
+                for (var j = 0; j < styles.length; j++) {
+                    styleHTML += styles[j].outerHTML;
+                }
+                
+                // 用正文替换body
+                document.body.innerHTML = contentElement.innerHTML;
+                
+                // 重新注入我们的暗黑CSS（确保优先级最高）
+                var newStyle = document.createElement('style');
+                newStyle.type = 'text/css';
+                newStyle.textContent = darkCSS;
+                document.head.appendChild(newStyle);
+                
+                // 滚动到顶部
+                window.scrollTo(0, 0);
+            }
+            
+            // ============================================================
+            // 5. 如果没有找到正文，仅注入CSS（保持原网页，美化样式）
+            // ============================================================
+            
+        })();
+        """
+        
+        # 执行JS脚本
+        self.detail_content.page().runJavaScript(cleanup_js)
     
     def analyze_selected_news(self):
         """对选中的新闻进行AI分析"""

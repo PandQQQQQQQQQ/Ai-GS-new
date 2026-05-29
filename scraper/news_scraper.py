@@ -11,6 +11,8 @@
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import re
+import os
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -312,6 +314,314 @@ class NewsScraper:
             }
         except Exception as e:
             print(f"解析央视新闻失败: {e}")
+        return None
+
+    # ============================================================
+    # 全文抓取：从原文网页获取完整内容
+    # ============================================================
+
+    def fetch_full_content(self, url: str) -> Optional[str]:
+        """
+        从原文网页抓取完整新闻内容
+        支持东方财富、财新网等主流财经网站
+        图片转为base64内嵌，无需额外下载
+        
+        Args:
+            url: 新闻原文链接
+
+        Returns:
+            str: 完整新闻正文（HTML格式），失败返回None
+        """
+        if not url or url == 'nan' or url == '':
+            return None
+
+        try:
+            import requests
+
+            session = requests.Session()
+            session.headers.update({
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
+            })
+
+            response = session.get(url, timeout=15)
+            response.encoding = response.apparent_encoding
+
+            html = response.text
+
+            # 根据URL域名选择不同的解析策略（传递session用于下载图片）
+            if 'eastmoney.com' in url:
+                return self._parse_eastmoney_full(html, session)
+            elif 'caixin.com' in url:
+                return self._parse_caixin_full(html)
+            elif 'cs.com.cn' in url:
+                return self._parse_cs_full(html)
+            elif 'jjckb.cn' in url:
+                return self._parse_jjckb_full(html)
+            else:
+                return self._parse_generic_full(html)
+
+        except Exception as e:
+            print(f"抓取全文失败: {e}")
+        return None
+
+    def _parse_eastmoney_full(self, html: str, page_response=None) -> Optional[str]:
+        """
+        解析东方财富网页正文（保留段落结构 + 图片base64内嵌）
+        复用页面请求的Session来下载图片，绕过防盗链
+        """
+        try:
+            import requests
+            import base64 as b64
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # 东方财富正文容器
+            content_elem = soup.find(id='ContentBody')
+            if not content_elem:
+                content_elem = soup.find(class_='txtinfos')
+            if not content_elem:
+                content_elem = soup.find(class_='Body')
+
+            if not content_elem:
+                return None
+
+            # 移除脚本、样式、广告等无用标签
+            for tag in content_elem.find_all(['script', 'style', 'iframe', 'noscript']):
+                tag.decompose()
+
+            # 构建HTML内容
+            html_parts = []
+
+            # 遍历正文容器的直接子元素，保持原始顺序
+            for child in content_elem.children:
+                if hasattr(child, 'name'):
+                    if child.name == 'p':
+                        text = child.get_text(strip=True)
+                        if text:
+                            if text.startswith('（文章来源'):
+                                html_parts.append(
+                                    f'<p style="color:#888; border-top:1px solid #ddd; '
+                                    f'padding-top:8px; margin-top:16px; font-size:12px;">'
+                                    f'{text}</p>'
+                                )
+                            elif text.startswith('（文中图片'):
+                                html_parts.append(
+                                    f'<p style="color:#aaa; font-size:11px;">{text}</p>'
+                                )
+                            else:
+                                html_parts.append(f'<p style="line-height:1.8; margin:8px 0;">{text}</p>')
+
+                    elif child.name == 'center':
+                        img = child.find('img')
+                        if img:
+                            src = img.get('src', '') or img.get('data-src', '')
+                            if src:
+                                if src.startswith('//'):
+                                    src = 'https:' + src
+                                b64_img = self._download_image_base64(src, page_response)
+                                if b64_img:
+                                    html_parts.append(
+                                        f'<p style="text-align:center; margin:12px 0;">'
+                                        f'<img src="{b64_img}" style="max-width:100%; height:auto;" />'
+                                        f'</p>'
+                                    )
+                        else:
+                            text = child.get_text(strip=True)
+                            if text:
+                                html_parts.append(f'<p style="text-align:center;">{text}</p>')
+
+                    elif child.name == 'img':
+                        src = child.get('src', '') or child.get('data-src', '')
+                        if src:
+                            if src.startswith('//'):
+                                src = 'https:' + src
+                            b64_img = self._download_image_base64(src, page_response)
+                            if b64_img:
+                                html_parts.append(
+                                    f'<p style="text-align:center; margin:12px 0;">'
+                                    f'<img src="{b64_img}" style="max-width:100%; height:auto;" />'
+                                    f'</p>'
+                                )
+
+                elif isinstance(child, str):
+                    text = child.strip()
+                    if text and text != '文章主体':
+                        html_parts.append(f'<p style="line-height:1.8;">{text}</p>')
+
+            if html_parts:
+                # 包裹在div中，设置整体样式
+                result = (
+                    f'<div style="font-family: Microsoft YaHei, SimSun, sans-serif; '
+                    f'font-size:14px; color:#333; padding:8px;">'
+                    f'{"".join(html_parts)}'
+                    f'</div>'
+                )
+                return result
+
+        except Exception as e:
+            print(f"解析东方财富全文失败: {e}")
+        return None
+
+    def _download_image_base64(self, url: str, session=None) -> Optional[str]:
+        """
+        下载图片并转为base64编码的data URI
+        复用页面请求的session来绕过防盗链
+        
+        Args:
+            url: 图片URL
+            session: requests.Session对象（复用其Cookie）
+            
+        Returns:
+            str: data:image URI字符串，失败返回None
+        """
+        try:
+            import requests
+            import base64 as b64
+
+            # 复用传入的session（保持Cookie）
+            if session is None:
+                session = requests.Session()
+                session.headers.update({
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                })
+                try:
+                    session.get('https://finance.eastmoney.com/', timeout=5)
+                except:
+                    pass
+
+            resp = session.get(url, timeout=15, allow_redirects=True,
+                               headers={'Referer': 'https://finance.eastmoney.com/'})
+
+            if resp.status_code == 200:
+                content_type = resp.headers.get('Content-Type', '')
+                data = resp.content
+
+                # 验证是否为真实图片
+                is_image = False
+                mime = 'image/jpeg'
+                if 'image/png' in content_type or data[:4] == b'\x89PNG':
+                    is_image = True
+                    mime = 'image/png'
+                elif 'image/gif' in content_type or data[:4] == b'GIF8':
+                    is_image = True
+                    mime = 'image/gif'
+                elif 'image/webp' in content_type:
+                    is_image = True
+                    mime = 'image/webp'
+                elif 'image/jpeg' in content_type or data[:2] == b'\xff\xd8':
+                    is_image = True
+                    mime = 'image/jpeg'
+                elif len(data) > 5000 and not data[:5].startswith(b'<'):
+                    is_image = True
+
+                if is_image and len(data) > 500:
+                    b64_str = b64.b64encode(data).decode('utf-8')
+                    return f'data:{mime};base64,{b64_str}'
+
+        except Exception as e:
+            print(f"下载图片base64失败: {e}")
+        return None
+
+    def _parse_caixin_full(self, html: str) -> Optional[str]:
+        """解析财新网页正文"""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            selectors = [
+                soup.find(class_='article-content'),
+                soup.find(id='Main_Content_Box'),
+                soup.find(class_='cons-wrapper'),
+            ]
+
+            for elem in selectors:
+                if elem:
+                    for tag in elem.find_all(['script', 'style', 'iframe']):
+                        tag.decompose()
+                    text = elem.get_text(separator='\n', strip=True)
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    return '\n'.join(lines)
+
+        except Exception as e:
+            print(f"解析财新网全文失败: {e}")
+        return None
+
+    def _parse_cs_full(self, html: str) -> Optional[str]:
+        """解析中证网/证券时报网页正文"""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            selectors = [
+                soup.find(class_='article-content'),
+                soup.find(id='custom-page-content'),
+                soup.find(class_='content'),
+            ]
+
+            for elem in selectors:
+                if elem:
+                    for tag in elem.find_all(['script', 'style', 'iframe']):
+                        tag.decompose()
+                    text = elem.get_text(separator='\n', strip=True)
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    return '\n'.join(lines)
+
+        except Exception as e:
+            print(f"解析中证网全文失败: {e}")
+        return None
+
+    def _parse_jjckb_full(self, html: str) -> Optional[str]:
+        """解析经济参考报网页正文"""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            selectors = [
+                soup.find(class_='article'),
+                soup.find(class_='content'),
+                soup.find(id='ContentBody'),
+            ]
+
+            for elem in selectors:
+                if elem:
+                    for tag in elem.find_all(['script', 'style', 'iframe']):
+                        tag.decompose()
+                    text = elem.get_text(separator='\n', strip=True)
+                    lines = [line.strip() for line in text.split('\n') if line.strip()]
+                    return '\n'.join(lines)
+
+        except Exception as e:
+            print(f"解析经济参考报全文失败: {e}")
+        return None
+
+    def _parse_generic_full(self, html: str) -> Optional[str]:
+        """通用网页正文解析"""
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(html, 'html.parser')
+
+            # 尝试常见的正文容器
+            selectors = [
+                soup.find('article'),
+                soup.find(class_=lambda x: x and 'article' in x.lower()),
+                soup.find(class_=lambda x: x and 'content' in x.lower()),
+                soup.find(id=lambda x: x and 'content' in x.lower()),
+                soup.find(class_=lambda x: x and 'body' in x.lower()),
+            ]
+
+            for elem in selectors:
+                if elem:
+                    for tag in elem.find_all(['script', 'style', 'iframe', 'nav', 'header', 'footer']):
+                        tag.decompose()
+                    text = elem.get_text(separator='\n', strip=True)
+                    if len(text) > 100:  # 至少100字才算有效正文
+                        lines = [line.strip() for line in text.split('\n') if line.strip()]
+                        return '\n'.join(lines)
+
+        except Exception as e:
+            print(f"通用解析全文失败: {e}")
         return None
 
     # ============================================================
