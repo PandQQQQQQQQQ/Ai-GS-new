@@ -55,7 +55,7 @@ def show_splash_and_launch(app: QApplication) -> MainWindow:
     title_label.setAlignment(Qt.AlignCenter)
     layout.addWidget(title_label)
 
-    version_label = QLabel("v0.0.3")
+    version_label = QLabel("v0.0.4")
     version_label.setStyleSheet("color: #888; font-size: 14px;")
     version_label.setAlignment(Qt.AlignCenter)
     layout.addWidget(version_label)

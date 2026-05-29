@@ -395,22 +395,39 @@ class MainWindow(QMainWindow):
         title_font.setBold(True)
         self.detail_title.setFont(title_font)
         self.detail_title.setWordWrap(True)
+        self.detail_title.setAlignment(Qt.AlignCenter)
+        self.detail_title.setStyleSheet("""
+            QLabel {
+                background: transparent;
+                padding: 8px 4px 4px 4px;
+            }
+        """)
         detail_layout.addWidget(self.detail_title)
         
-        # 元信息标签
+        # 元信息标签（放在内容区域下方右下角）
         self.detail_meta = QLabel("")
         meta_font = QFont()
         meta_font.setPointSize(10)
         self.detail_meta.setFont(meta_font)
-        self.detail_meta.setStyleSheet("color: #666;")
-        detail_layout.addWidget(self.detail_meta)
+        self.detail_meta.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.detail_meta.setStyleSheet("""
+            QLabel {
+                color: #888888;
+                background: transparent;
+                padding: 4px 8px 2px 0;
+            }
+        """)
+        # 暂不添加到布局，将在 detail_content 之后添加
         
         # 内容浏览器控件（支持HTML渲染和图片显示）
         self.detail_content = QWebEngineView()
         self.detail_content.setMinimumHeight(200)
         # 网页加载完成后，自动净化内容（提取正文+注入暗黑样式）
         self.detail_content.loadFinished.connect(self._on_webpage_loaded)
-        detail_layout.addWidget(self.detail_content)
+        detail_layout.addWidget(self.detail_content, stretch=1)  # stretch=1 让浏览器占满剩余空间
+
+        # 元信息（发布时间+来源）放在内容下方右下角
+        detail_layout.addWidget(self.detail_meta)
         
         # 原文链接（可点击）
         url_layout = QHBoxLayout()
@@ -431,7 +448,7 @@ class MainWindow(QMainWindow):
         url_layout.addStretch()
         detail_layout.addLayout(url_layout)
         
-        layout.addWidget(detail_group, stretch=1)
+        layout.addWidget(detail_group, stretch=3)
         
         # ----- AI评估结果区域 -----
         ai_group = QGroupBox("AI 评估结果")
@@ -815,7 +832,7 @@ class MainWindow(QMainWindow):
                     font-family: "Microsoft YaHei", "SimSun", "PingFang SC", sans-serif !important;
                     font-size: 16px !important;
                     line-height: 1.8 !important;
-                    padding: 20px 24px !important;
+                    padding: 15px !important;
                     overflow-x: hidden !important;
                 }
                 
@@ -828,15 +845,25 @@ class MainWindow(QMainWindow):
                     color: #e0e0e0 !important;
                 }
                 
-                /* 标题 */
+                /* 标题：居中 + 紧凑间距 */
                 h1, h2, h3, h4, h5, h6 {
                     color: #ffffff !important;
-                    margin: 20px 0 12px 0 !important;
                     font-weight: bold !important;
                 }
-                h1 { font-size: 22px !important; }
-                h2 { font-size: 20px !important; }
-                h3 { font-size: 18px !important; }
+                h1 {
+                    font-size: 22px !important;
+                    text-align: center !important;
+                    margin-top: 10px !important;
+                    margin-bottom: 5px !important;
+                }
+                h2 {
+                    font-size: 20px !important;
+                    margin: 15px 0 8px 0 !important;
+                }
+                h3 {
+                    font-size: 18px !important;
+                    margin: 12px 0 6px 0 !important;
+                }
                 
                 /* 图片：居中、自适应宽度 */
                 img {
@@ -895,13 +922,25 @@ class MainWindow(QMainWindow):
                     border-radius: 0 4px 4px 0 !important;
                 }
                 
-                /* 来源信息 */
-                .em_media, .source, .editor {
+                /* 正文容器：去除多余padding，释放空间 */
+                .b-new-content, .txtinfos, .article-content,
+                #Main_Content_Box, .cons-wrapper, #custom-page-content,
+                .content, #ContentBody {
+                    padding: 0 !important;
+                    margin: 0 !important;
+                }
+                
+                /* 来源信息：居中 + 紧凑 */
+                .em_media, .source, .editor, .time, .pub-time,
+                [class*="source"], [class*="time"], [class*="date"],
+                [class*="Info"], [class*="author"] {
                     color: #888888 !important;
                     font-size: 13px !important;
-                    margin-top: 24px !important;
-                    padding-top: 12px !important;
-                    border-top: 1px solid #333355 !important;
+                    text-align: center !important;
+                    margin-top: 5px !important;
+                    margin-bottom: 15px !important;
+                    padding: 0 !important;
+                    border-top: none !important;
                 }
                 
                 /* 隐藏不需要的元素 */
