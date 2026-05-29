@@ -1,0 +1,23 @@
+# A-Share News AI Analysis System
+# Python Dependencies
+
+# GUI Framework
+PySide6>=6.5.0
+
+# Database
+# (Using built-in sqlite3)
+
+# News Data Collection
+akshare>=1.12.0
+pandas>=2.0.0
+requests>=2.31.0
+
+# AI Analysis (Optional)
+# DeepSeek / Mini (OpenAI compatible)
+openai>=1.0.0
+
+# Google Gemini
+# google-generativeai>=0.3.0
+
+# Utils
+python-dotenv>=1.0.0
