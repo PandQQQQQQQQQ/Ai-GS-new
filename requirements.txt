@@ -21,3 +21,6 @@ openai>=1.0.0
 
 # Utils
 python-dotenv>=1.0.0
+
+# Chinese Pinyin (for stock name search)
+# pypinyin>=0.50.0

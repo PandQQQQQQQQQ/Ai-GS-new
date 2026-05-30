@@ -6,6 +6,17 @@ A股上市公司新闻自动化收集与AI评估软件
 创建日期: 2026-05-29
 """
 
+# ============================================================
+# 【进程级物理屏蔽】必须在所有 import 之前执行
+# 在进程启动的第一秒就彻底杀掉代理环境变量
+# 防止 AkShare / requests 底层读取系统代理导致 ProxyError
+# ============================================================
+import os
+os.environ['NO_PROXY'] = '*'  # 强制所有请求都不走代理
+for _key in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+    if _key in os.environ:
+        del os.environ[_key]
+
 import sys
 import subprocess
 from PySide6.QtWidgets import QApplication, QSplashScreen, QLabel, QVBoxLayout, QProgressBar
@@ -55,7 +66,7 @@ def show_splash_and_launch(app: QApplication) -> MainWindow:
     title_label.setAlignment(Qt.AlignCenter)
     layout.addWidget(title_label)
 
-    version_label = QLabel("v0.0.4")
+    version_label = QLabel("v0.0.5")
     version_label.setStyleSheet("color: #888; font-size: 14px;")
     version_label.setAlignment(Qt.AlignCenter)
     layout.addWidget(version_label)

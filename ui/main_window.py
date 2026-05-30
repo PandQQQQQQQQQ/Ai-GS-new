@@ -8,15 +8,17 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
     QTextEdit, QLabel, QPushButton, QGroupBox, QProgressBar,
-    QMessageBox, QAbstractItemView, QComboBox, QLineEdit
+    QMessageBox, QAbstractItemView, QComboBox, QLineEdit,
+    QDialog
 )
-from PySide6.QtCore import Qt, QThread, Signal, QDateTime, QUrl
+from PySide6.QtCore import Qt, QThread, Signal, QDateTime, QUrl, QTimer
 from PySide6.QtGui import QFont, QColor, QBrush, QDesktopServices
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from db.database import Database
 from scraper.news_scraper import NewsScraper
 from ai.analyzer import AIAnalyzer
+from ui.market_radar_dialog import MarketRadarDialog
 
 
 class NewsFetchWorker(QThread):
@@ -181,6 +183,65 @@ class AIAnalyzeWorker(QThread):
         self.wait()
 
 
+class IndexButtonWorker(QThread):
+    """
+    大盘按钮文本刷新工作线程
+    通过新浪财经接口获取上证指数
+    """
+    index_ready = Signal(str)   # 格式如 "上证指数 +1.23%"
+    error_occurred = Signal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._is_running = True
+
+    def run(self):
+        # ========== 禁用代理 ==========
+        import os
+        os.environ['NO_PROXY'] = '*'
+        os.environ['no_proxy'] = '*'
+        for _key in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']:
+            if _key in os.environ:
+                del os.environ[_key]
+
+        # ========== 通过新浪接口获取指数数据 ==========
+        import time
+        import random
+        
+        for attempt in range(1, 3):  # 最多2次
+            if not self._is_running:
+                return
+            try:
+                from ui.market_radar_dialog import _fetch_index_data
+                time.sleep(random.uniform(0.1, 0.3))
+                
+                records = _fetch_index_data()
+                
+                if not self._is_running:
+                    return
+                # 查找上证指数（代码 000001）
+                for rec in records:
+                    code = str(rec.get("代码", ""))
+                    if code == "000001":
+                        price = float(rec.get("最新价", 0))
+                        change_pct = float(rec.get("涨跌幅", 0))
+                        if change_pct > 0:
+                            text = f"上证指数 {price:.2f}  +{change_pct:.2f}%"
+                        else:
+                            text = f"上证指数 {price:.2f}  {change_pct:.2f}%"
+                        if self._is_running:
+                            self.index_ready.emit(text)
+                        return
+            except Exception as e:
+                print(f"[Debug] IndexButtonWorker 第{attempt}次异常: {e}")
+                if attempt < 2:
+                    time.sleep(2)
+
+    def stop(self):
+        self._is_running = False
+        self.wait()
+
+
 class MainWindow(QMainWindow):
     """
     应用程序主窗口
@@ -202,11 +263,20 @@ class MainWindow(QMainWindow):
         # 当前选中的新闻
         self.current_news = None
         
+        # ---------- 大盘行情定时器（每10秒刷新按钮文本） ----------
+        self.market_timer = QTimer(self)
+        self.market_timer.timeout.connect(self._update_market_btn_text)
+        self._market_btn_text = "上证指数 --  🔄 点击进入雷达"
+        
         # 初始化UI
         self.init_ui()
         
         # 加载已有新闻
         self.load_news_from_db()
+        
+        # 启动大盘定时器
+        self._update_market_btn_text()   # 立即首次刷新
+        self.market_timer.start(5000)   # 每5秒刷新
     
     def init_ui(self):
         """初始化用户界面"""
@@ -290,15 +360,41 @@ class MainWindow(QMainWindow):
         self.refresh_btn.clicked.connect(self.refresh_news)
         button_layout.addWidget(self.refresh_btn)
         
-        # 获取新闻按钮
-        self.fetch_btn = QPushButton("📥 获取最新新闻")
-        self.fetch_btn.setStyleSheet("""
+        # 大盘行情看板按钮（替代原来的"获取最新新闻"）
+        # 点击后弹出行情雷达对话框，不再执行新闻抓取
+        self.market_btn = QPushButton("上证指数 --  🔄 点击进入雷达")
+        self.market_btn.setStyleSheet("""
             QPushButton {
-                background-color: #2196F3;
-                color: white;
-                padding: 8px 16px;
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #1a237e, stop:1 #283593);
+                color: #ffffff;
+                padding: 8px 12px;
                 border-radius: 4px;
                 font-weight: bold;
+                font-size: 12px;
+                border: 1px solid #3f51b5;
+                min-height: 34px;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #283593, stop:1 #3949ab);
+                border: 1px solid #5c6bc0;
+            }
+        """)
+        self.market_btn.clicked.connect(self._open_market_radar)
+        button_layout.addWidget(self.market_btn, stretch=1)  # 弹性占满
+        
+        # 小巧的新闻抓取按钮（保留原"获取最新新闻"的逻辑）
+        self.fetch_btn_small = QPushButton("📥")
+        self.fetch_btn_small.setToolTip("获取最新新闻（后台采集）")
+        self.fetch_btn_small.setMaximumWidth(36)
+        self.fetch_btn_small.setStyleSheet("""
+            QPushButton {
+                background-color: #1565C0;
+                color: white;
+                padding: 8px 4px;
+                border-radius: 4px;
+                font-size: 14px;
             }
             QPushButton:hover {
                 background-color: #1976D2;
@@ -307,8 +403,8 @@ class MainWindow(QMainWindow):
                 background-color: #BDBDBD;
             }
         """)
-        self.fetch_btn.clicked.connect(self.fetch_news)
-        button_layout.addWidget(self.fetch_btn)
+        self.fetch_btn_small.clicked.connect(self.fetch_news)
+        button_layout.addWidget(self.fetch_btn_small)
         
         # AI分析选中按钮
         self.analyze_btn = QPushButton("🤖 AI分析选中新闻")
@@ -567,7 +663,7 @@ class MainWindow(QMainWindow):
     
     def fetch_news(self):
         """获取最新新闻（仅采集，不自动保存）"""
-        self.fetch_btn.setEnabled(False)
+        self.fetch_btn_small.setEnabled(False)
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
         self.statusBar().showMessage("正在获取新闻...")
@@ -613,9 +709,49 @@ class MainWindow(QMainWindow):
     
     def on_fetch_finished(self):
         """新闻获取线程结束回调"""
-        self.fetch_btn.setEnabled(True)
+        self.fetch_btn_small.setEnabled(True)
         self.progress_bar.setVisible(False)
         self.fetch_worker = None
+
+    # ----------------------------------------------------------
+    # 大盘行情看板按钮相关
+    # ----------------------------------------------------------
+    def _open_market_radar(self):
+        """
+        打开市场雷达对话框
+        点击大盘行情按钮时触发，弹出 MarketRadarDialog
+        """
+        dialog = MarketRadarDialog(self)
+        dialog.exec()
+    
+    def _update_market_btn_text(self):
+        """
+        每10秒触发：后台刷新大盘行情并更新按钮文本
+        使用 AkShare 异步获取上证指数实时涨跌幅
+        """
+        # 启动工作线程获取指数数据（不阻塞UI）
+        self._index_worker = IndexButtonWorker()
+        self._index_worker.index_ready.connect(self._on_index_btn_data)
+        self._index_worker.error_occurred.connect(self._on_index_btn_error)
+        self._index_worker.finished.connect(self._cleanup_index_btn_worker)
+        self._index_worker.start()
+    
+    def _on_index_btn_data(self, sh_text: str):
+        """
+        指数数据回调：更新按钮显示的文本
+        
+        Args:
+            sh_text: 格式化后的上证指数文本，如 "上证指数 +1.23%"
+        """
+        self._market_btn_text = f"{sh_text}  🔄 点击进入雷达"
+        self.market_btn.setText(self._market_btn_text)
+    
+    def _on_index_btn_error(self, _error_msg: str):
+        """指数获取失败时显示默认文本"""
+        self.market_btn.setText("上证指数 --  🔄 点击进入雷达")
+    
+    def _cleanup_index_btn_worker(self):
+        self._index_worker = None
     
     def load_news_from_db(self):
         """从数据库加载新闻到列表（最多显示最近200条，避免卡顿）"""
@@ -1105,6 +1241,9 @@ class MainWindow(QMainWindow):
     
     def closeEvent(self, event):
         """窗口关闭事件"""
+        # 停止大盘定时器
+        self.market_timer.stop()
+        
         # 停止所有工作线程
         if self.fetch_worker and self.fetch_worker.isRunning():
             self.fetch_worker.stop()
@@ -1112,6 +1251,8 @@ class MainWindow(QMainWindow):
             self.analyze_worker.stop()
         if hasattr(self, 'refresh_worker') and self.refresh_worker and self.refresh_worker.isRunning():
             self.refresh_worker.stop()
+        if hasattr(self, '_index_worker') and self._index_worker and self._index_worker.isRunning():
+            self._index_worker.stop()
         
         # 关闭数据库连接
         self.db.close()
